@@ -1,0 +1,204 @@
+import sys
+
+import load
+from random import randint
+from sklearn import preprocessing
+import numpy as np
+from itertools import accumulate
+
+
+import os
+from keras.layers import Input, LSTM, Dense
+from keras.models import Model, optimizers as opt
+from keras.layers import BatchNormalization
+
+root_folder = sys.argv[1]
+suffix_name = '.plt'
+fileList = []
+
+
+def align(series):
+    maxLen = 0
+    effDataLen = []
+    for ele in range(len(series)):
+        effDataLen.append(series[ele].shape[0])
+        if series[ele].shape[0] > maxLen:
+            maxLen = series[ele].shape[0]
+    for ele in range(len(series)):
+        z = np.zeros((maxLen-series[ele].shape[0], 3), dtype=series[0].dtype)
+        alignNum = maxLen-series[ele].shape[0]
+        z = np.tile(series[ele][effDataLen[ele]-1], (alignNum,1))
+
+        series[ele] = np.concatenate((series[ele],z), axis=0)
+    return series,effDataLen
+
+
+def getFileList(folder, list):
+    for name in os.listdir(folder):
+        if os.path.isdir(os.path.join(folder, name)):
+            getFileList(os.path.join(folder, name), list)
+        elif name.endswith(suffix_name):
+            list.append(os.path.join(folder, name))
+
+
+
+getFileList(root_folder,fileList)
+
+
+steps = 1
+latent_dim = 512
+input_dim = 3
+output_dim = 3
+
+batch_size = 64  # Batch size for training.
+epochs = 100  # Number of epochs to train for.
+
+
+series = list(map(load.loadFile,fileList))
+
+series,effDataLen = align(series)
+
+
+new3Darray = np.asarray(series, dtype=series[0].dtype)
+w=1
+
+new3Darray = np.clip(new3Darray,0,0)
+
+series =[]
+for ele in range(len(new3Darray)):
+    series.append(np.asarray(new3Darray[ele],dtype=new3Darray[0].dtype))
+
+steps = max(effDataLen)
+
+
+
+randIndexList = []
+for ele in range(len(effDataLen)):
+     randIndexList.append(randint(int(effDataLen[ele]/2),int(effDataLen[ele]*3/5)))
+print(randIndexList)
+
+
+
+srcArray = list()
+tgtArray = list()
+accuV = (np.asarray(range(max(effDataLen)-1),dtype=np.int16)+1)
+
+#for x in range(len(series)):
+    #srcArray.append(series[x][:randIndexList[x],:])
+    #tgtArray.append(series[x][randIndexList[x]-1:,:])
+#    tgtArray.append(series[x][1:,:])
+#    tgtArray[x]=np.delete(tgtArray[x],0,axis=1)
+#    tgtArray[x]= np.column_stack((accuV,tgtArray[x]))
+
+
+
+#encoder_input_data, eidEffLenList = align(srcArray)
+
+
+#encoder_input_data = []
+#for x in range(len(series)):
+#    encoder_input_data.append(series[x][0].reshape(1,3))
+
+encoder_input_data = series
+
+decoder_input_data = np.zeros(shape=(len(series),series[0].shape[0],series[0].shape[1]))
+
+#decoder_input_data,_ = align(tgtArray)
+
+
+#decoder_target_data = decoder_input_data
+decoder_target_data = series
+
+
+
+
+
+
+encoder_input_data = np.asarray(encoder_input_data,dtype=series[0].dtype)
+decoder_input_data = np.asarray(decoder_input_data,dtype=series[0].dtype)
+
+
+decoder_input_data = decoder_input_data
+
+decoder_target_data = np.asarray(decoder_target_data,dtype=series[0].dtype)
+decoder_target_data = np.concatenate([decoder_input_data[:, 1:, :],np.zeros((decoder_input_data.shape[0],1, decoder_input_data.shape[2]),dtype=series[0].dtype)], axis = 1)
+decoder_target_data = decoder_target_data
+
+
+encoder_inputs = Input(shape=(None, input_dim))
+
+encoder = LSTM(latent_dim, return_state=True)
+
+
+encoder_outpus, state_h, state_c = encoder(encoder_inputs)
+
+encoder_states = [state_h, state_c]
+
+decoder_inputs = Input(shape=(None, output_dim))
+decoder_lstm = LSTM(latent_dim, return_sequences=True, return_state=True)
+decoder_outputs, _, _ = decoder_lstm(decoder_inputs, initial_state=encoder_states)
+
+
+decoder_dense = Dense(output_dim,activation='softmax')
+decoder_outputs = decoder_dense(decoder_outputs)
+
+
+model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
+
+model.compile(optimizer=opt.Nadam(), loss='mse') #Nadam
+model.fit([encoder_input_data, decoder_input_data], decoder_target_data,
+           batch_size=batch_size,
+           epochs=epochs,
+           validation_split=0.2)
+
+model.save('s2s.h5')
+
+#################### fit above
+
+encoder_model = Model(encoder_inputs, encoder_states)
+
+decoder_state_input_h = Input(shape=(latent_dim,))
+decoder_state_input_c = Input(shape=(latent_dim,))
+decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+decoder_outputs, state_h, state_c = decoder_lstm(decoder_inputs, initial_state=decoder_states_inputs)
+decoder_states = [state_h, state_c]
+decoder_outputs = decoder_dense(decoder_outputs)
+decoder_model = Model(
+     [decoder_inputs] + decoder_states_inputs,
+     [decoder_outputs] + decoder_states)
+
+
+
+
+
+def decode_sequence(input_seq):
+    # Encode the input as state vectors.
+    #input_seq = np.zeros((1,len(input_seq[0]),3))
+    #accuV = (np.asarray(range(len(input_seq[0]) ), dtype=np.int16) + 1)
+    #temp = np.delete(input_seq[0],0,axis=1)
+    #input_seq[0] = np.column_stack((accuV,temp))
+
+    w3 = 1
+    states_value = encoder_model.predict((input_seq))
+    target_seq = input_seq[0,-1].reshape(1,1,3)
+    stop_condition = False
+    decode_trajectory = np.asarray(input_seq)
+    count = 0
+    while not stop_condition:
+        output_coordinate, h, c = decoder_model.predict(
+            [target_seq]+states_value
+        )
+        print(output_coordinate)
+
+        count = count+output_coordinate[0,0,0]
+        if(output_coordinate[0,0,0]<target_seq[0,0,0]) and count <= 100:
+            count = count+1
+            continue
+        else:
+            decode_trajectory = np.concatenate((decode_trajectory, output_coordinate), axis=1)
+            stop_condition = True
+        target_seq = output_coordinate
+        states_value = [h, c]
+    return decode_trajectory
+
+
